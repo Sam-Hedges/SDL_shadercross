@@ -196,7 +196,7 @@ jobs:
           ctest . -V -C Release
 
       - name: Verify CMake configuration files
-        if: ${{ always() && steps.install.outcome == 'success' }}
+        if: ${{ always() && steps.install.outcome == 'success' && !matrix.platform.static-only }}
         run: |
           cmake -S cmake/test -B cmake_config_build -GNinja \
             -DCMAKE_BUILD_TYPE=Release \
