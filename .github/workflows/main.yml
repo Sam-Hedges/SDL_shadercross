@@ -90,13 +90,18 @@ jobs:
       # ── SDL_shadercross Release ─────────────────────────────────────────────
       - name: Configure (CMake) Release
         run: |
+          dxc_root="${DirectXShaderCompiler_ROOT}"
+          if test "x${{ (matrix.platform.msvc && 'msvc') || '' }}" = "xmsvc"; then
+            dxc_root=$(cygpath -w "${dxc_root}")
+          fi
           cmake -S . -B build_release -GNinja \
             -DSDLSHADERCROSS_TESTS=ON \
             -DSDLSHADERCROSS_TESTS_TRACKMEM=ON \
             -DCMAKE_BUILD_TYPE=Release \
             -DSDLSHADERCROSS_SHARED=OFF \
             -DSDLSHADERCROSS_STATIC=ON \
-            -DSDLSHADERCROSS_VENDORED=${{ matrix.platform.vendored }} \
+            -DSDLSHADERCROSS_VENDORED=OFF \
+            -DDirectXShaderCompiler_ROOT="${dxc_root}" \
             -DSDLSHADERCROSS_CLI=ON \
             -DSDLSHADERCROSS_WERROR=ON \
             -DSDLSHADERCROSS_INSTALL=ON \
@@ -120,13 +125,18 @@ jobs:
       # ── SDL_shadercross Debug ───────────────────────────────────────────────
       - name: Configure (CMake) Debug
         run: |
+          dxc_root="${DirectXShaderCompiler_ROOT}"
+          if test "x${{ (matrix.platform.msvc && 'msvc') || '' }}" = "xmsvc"; then
+            dxc_root=$(cygpath -w "${dxc_root}")
+          fi
           cmake -S . -B build_debug -GNinja \
             -DSDLSHADERCROSS_TESTS=ON \
             -DSDLSHADERCROSS_TESTS_TRACKMEM=ON \
             -DCMAKE_BUILD_TYPE=Debug \
             -DSDLSHADERCROSS_SHARED=OFF \
             -DSDLSHADERCROSS_STATIC=ON \
-            -DSDLSHADERCROSS_VENDORED=${{ matrix.platform.vendored }} \
+            -DSDLSHADERCROSS_VENDORED=OFF \
+            -DDirectXShaderCompiler_ROOT="${dxc_root}" \
             -DSDLSHADERCROSS_CLI=ON \
             -DSDLSHADERCROSS_WERROR=ON \
             -DSDLSHADERCROSS_INSTALL=ON \
@@ -225,6 +235,11 @@ jobs:
                 `${_sc_dir}/lib/release/spirv-cross-util.lib
               >
               `${_sc_dir}/lib/release/dxcompiler.lib
+              d3d12.lib
+              dxgi.lib
+              dxguid.lib
+              ole32.lib
+              oleaut32.lib
             ]=]
           )
           "@ | Out-File -Encoding utf8 static-artifact/SDL3_shadercross_static.cmake
