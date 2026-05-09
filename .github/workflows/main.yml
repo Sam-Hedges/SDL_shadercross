@@ -17,6 +17,7 @@ jobs:
       matrix:
         platform:
           - { name: Windows (MSVC),                os: windows-latest, build-spirv-cross: true,  vendored: false, shell: sh, msvc: true, artifact: 'SDL3_shadercross-VC-x64' }
+          - { name: Windows (MSVC) Static,         os: windows-latest, build-spirv-cross: true,  vendored: false, shell: sh, msvc: true, artifact: 'SDL3_shadercross-VC-x64-static', static-only: true }
           - { name: Windows (mingw64),             os: windows-latest, build-spirv-cross: false, vendored: false, shell: 'msys2 {0}', msystem: mingw64, msys-env: mingw-w64-x86_64, artifact: 'SDL3_shadercross-mingw64' }
           - { name: Ubuntu 24.04,                  os: ubuntu-24.04,   build-spirv-cross: true,  vendored: false, shell: sh, artifact: 'SDL3_shadercross-linux-x64' }
           - { name: Steam Linux Runtime (Sniper),  os: ubuntu-latest,  build-spirv-cross: false,  vendored: true, shell: sh, artifact: 'SDL3_shadercross-slrsniper', container: 'registry.gitlab.steamos.cloud/steamrt/sniper/sdk:latest' }
@@ -57,20 +58,14 @@ jobs:
       - name: Install Linux requirements
         if: ${{ contains(matrix.platform.os, 'ubuntu') }}
         run: |
-          # patchelf is needed to fix the runpath of libSDL3.so.0
           wget https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-0.18.0-x86_64.tar.gz
           tar xf patchelf-0.18.0-x86_64.tar.gz ./bin/patchelf
           echo "${PWD}/bin" >>$GITHUB_PATH
-
-          # libxrandr-dev is needed by vulkan-loader
-          # libjson-perl is a (build-time) dependency of vkd3d 3.16+
           sudo apt-get update -y
           sudo apt-get install -y patchelf libxrandr-dev libjson-perl
       - name: Install macOS requirements
         if: ${{ runner.os == 'macOS' }}
         run: |
-          # bison is needed by vkd3d
-          # perl-json is needed by vkd3d 1.16+
           brew install bison cpanm
           echo "/opt/homebrew/opt/bison/bin" >>$GITHUB_PATH
           cpanm install JSON
@@ -97,13 +92,14 @@ jobs:
           fi
           joiner="${{ (runner.os == 'Windows' && ';') || ':' }}"
           echo "spirv_cross_c_shared_ROOT=${spirv_cross_prefix}${joiner}${spirv_cross_prefix}/share/spirv_cross_c_shared" >>${GITHUB_ENV}
+
       - name: Configure (CMake)
         run: |
           cmake -S . -B build -GNinja \
             -DSDLSHADERCROSS_TESTS=ON \
             -DSDLSHADERCROSS_TESTS_TRACKMEM=ON \
             -DCMAKE_BUILD_TYPE=Release \
-            -DSDLSHADERCROSS_SHARED=ON \
+            -DSDLSHADERCROSS_SHARED=${{ matrix.platform.static-only && 'OFF' || 'ON' }} \
             -DSDLSHADERCROSS_STATIC=ON \
             -DSDLSHADERCROSS_VENDORED=${{ matrix.platform.vendored }} \
             -DSDLSHADERCROSS_CLI=ON \
@@ -119,17 +115,85 @@ jobs:
         id: build
         run: |
           cmake --build build --config Release --parallel --verbose
+
       - name: Install (CMake)
         id: install
         if: ${{ always() && steps.build.outcome == 'success' }}
         run: |
           cmake --install build/ --config Release
           echo "SDL3_shadercross_ROOT=${PWD}/prefix" >>${GITHUB_ENV}
+
       - name: Package (CPack)
         id: package
         if: ${{ always() && steps.build.outcome == 'success' }}
         run: |
           cmake --build build/ --target package
+
+      - name: Collect static libs for linking (MSVC static only)
+        id: collect-static
+        if: ${{ always() && steps.build.outcome == 'success' && matrix.platform.static-only }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path static-artifact/lib
+          New-Item -ItemType Directory -Force -Path static-artifact/include
+
+          # SDL3_shadercross static lib
+          Copy-Item prefix/lib/SDL3_shadercross-static.lib static-artifact/lib/ -ErrorAction SilentlyContinue
+          Copy-Item prefix/lib/SDL3_shadercross.lib        static-artifact/lib/ -ErrorAction SilentlyContinue
+
+          # SPIRV-Cross static libs (all components you might need)
+          Get-ChildItem spirv_cross_prefix/lib/*.lib | ForEach-Object {
+            Copy-Item $_ static-artifact/lib/
+          }
+
+          # DXC import lib (dxcompiler.lib) — needed at link time; the DLL ships at runtime
+          $dxc_root = $env:DirectXShaderCompiler_ROOT
+          if ($dxc_root) {
+            Get-ChildItem "$dxc_root/lib/*.lib" -ErrorAction SilentlyContinue | ForEach-Object {
+              Copy-Item $_ static-artifact/lib/
+            }
+            # Also grab the DXC DLLs — you still need these at runtime even with static linking
+            New-Item -ItemType Directory -Force -Path static-artifact/bin
+            Get-ChildItem "$dxc_root/bin/*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
+              Copy-Item $_ static-artifact/bin/
+            }
+          }
+
+          # Headers
+          Copy-Item prefix/include -Destination static-artifact/ -Recurse -Force
+
+          # Write a CMake fragment so consumers can just include() it
+          @"
+          # SDL3_shadercross static link helper
+          # Include this file in your CMakeLists.txt after setting SHADERCROSS_STATIC_DIR
+          # e.g. include(SDL3_shadercross_static.cmake)
+
+          set(_sc_lib_dir "`${CMAKE_CURRENT_LIST_DIR}/lib")
+          set(_sc_inc_dir "`${CMAKE_CURRENT_LIST_DIR}/include")
+
+          add_library(SDL3_shadercross::static STATIC IMPORTED GLOBAL)
+          set_target_properties(SDL3_shadercross::static PROPERTIES
+            IMPORTED_LOCATION             "`${_sc_lib_dir}/SDL3_shadercross-static.lib"
+            INTERFACE_INCLUDE_DIRECTORIES "`${_sc_inc_dir}"
+            INTERFACE_LINK_LIBRARIES      [=[
+              `${_sc_lib_dir}/spirv-cross-c.lib
+              `${_sc_lib_dir}/spirv-cross-core.lib
+              `${_sc_lib_dir}/spirv-cross-glsl.lib
+              `${_sc_lib_dir}/spirv-cross-hlsl.lib
+              `${_sc_lib_dir}/spirv-cross-msl.lib
+              `${_sc_lib_dir}/spirv-cross-reflect.lib
+              `${_sc_lib_dir}/spirv-cross-util.lib
+              `${_sc_lib_dir}/dxcompiler.lib
+            ]=]
+          )
+          "@ | Out-File -Encoding utf8 static-artifact/SDL3_shadercross_static.cmake
+
+      - name: Package (CPack)
+        id: package
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        run: |
+          cmake --build build/ --target package
+
       - name: Tests (CTest)
         id: test
         if: ${{ always() && steps.build.outcome == 'success' }}
@@ -145,9 +209,18 @@ jobs:
             ${{ matrix.platform.cmake-arguments }}
           cmake --build cmake_config_build --verbose
 
+      # Original artifact upload (CPack dist) for all non-static jobs
       - uses: actions/upload-artifact@v4
-        if: ${{ always() && steps.package.outcome == 'success' }}
+        if: ${{ always() && steps.package.outcome == 'success' && !matrix.platform.static-only }}
         with:
           if-no-files-found: error
           name: ${{ matrix.platform.artifact }}
           path: build/dist/SDL*
+
+      # Static artifact upload — the manually collected lib bundle
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && steps.collect-static.outcome == 'success' }}
+        with:
+          if-no-files-found: error
+          name: ${{ matrix.platform.artifact }}
+          path: static-artifact/
