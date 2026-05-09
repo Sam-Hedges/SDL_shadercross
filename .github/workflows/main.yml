@@ -123,12 +123,6 @@ jobs:
           cmake --install build/ --config Release
           echo "SDL3_shadercross_ROOT=${PWD}/prefix" >>${GITHUB_ENV}
 
-      - name: Package (CPack)
-        id: package
-        if: ${{ always() && steps.build.outcome == 'success' }}
-        run: |
-          cmake --build build/ --target package
-
       - name: Collect static libs for linking (MSVC static only)
         id: collect-static
         if: ${{ always() && steps.build.outcome == 'success' && matrix.platform.static-only }}
