@@ -16,12 +16,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { name: Windows (MSVC),                os: windows-latest, build-spirv-cross: true,  vendored: false, shell: sh, msvc: true, artifact: 'SDL3_shadercross-VC-x64' }
-          - { name: Windows (MSVC) Static,         os: windows-latest, build-spirv-cross: true,  vendored: false, shell: sh, msvc: true, artifact: 'SDL3_shadercross-VC-x64-static', static-only: true }
-          - { name: Windows (mingw64),             os: windows-latest, build-spirv-cross: false, vendored: false, shell: 'msys2 {0}', msystem: mingw64, msys-env: mingw-w64-x86_64, artifact: 'SDL3_shadercross-mingw64' }
-          - { name: Ubuntu 24.04,                  os: ubuntu-24.04,   build-spirv-cross: true,  vendored: false, shell: sh, artifact: 'SDL3_shadercross-linux-x64' }
-          - { name: Steam Linux Runtime (Sniper),  os: ubuntu-latest,  build-spirv-cross: false,  vendored: true, shell: sh, artifact: 'SDL3_shadercross-slrsniper', container: 'registry.gitlab.steamos.cloud/steamrt/sniper/sdk:latest' }
-          - { name: macOS,                         os: macos-latest,   build-spirv-cross: true,  vendored: true,  shell: sh, artifact: 'SDL3_shadercross-macos-arm64', cmake-arguments: '-DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCMAKE_C_FLAGS="-mmacosx-version-min=11.0" -DCMAKE_CXX_FLAGS="-mmacosx-version-min=11.0"' }
+          - { name: Windows (MSVC) Static, os: windows-latest, build-spirv-cross: true,  vendored: false, shell: sh, msvc: true, artifact: 'SDL3_shadercross-VC-x64-static', static-only: true }
+          - { name: Ubuntu 24.04 Static,   os: ubuntu-24.04,   build-spirv-cross: true,  vendored: false, shell: sh, artifact: 'SDL3_shadercross-linux-x64-static', static-only: true }
 
     steps:
       - uses: actions/checkout@v4
@@ -29,21 +25,10 @@ jobs:
           submodules: recursive
       - name: Set up Ninja
         uses: ./.github/actions/setup-ninja
-        if: ${{ !contains(matrix.platform.shell, 'msys2') && !contains(matrix.platform.container, 'steamrt') }}
       - uses: ilammy/msvc-dev-cmd@v1
         if: ${{ matrix.platform.msvc }}
         with:
           arch: x64
-      - name: Set up MSYS2
-        if: ${{ matrix.platform.shell == 'msys2 {0}' }}
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: ${{ matrix.platform.msystem }}
-          install: >-
-            ${{ matrix.platform.msys-env }}-cmake
-            ${{ matrix.platform.msys-env }}-gcc
-            ${{ matrix.platform.msys-env }}-ninja
-            ${{ (!matrix.platform.vendored && format('{0}-spirv-cross', matrix.platform.msys-env)) || '' }}
       - name: Set up SDL
         id: sdl
         uses: libsdl-org/setup-sdl@main
@@ -63,43 +48,53 @@ jobs:
           echo "${PWD}/bin" >>$GITHUB_PATH
           sudo apt-get update -y
           sudo apt-get install -y patchelf libxrandr-dev libjson-perl
-      - name: Install macOS requirements
-        if: ${{ runner.os == 'macOS' }}
-        run: |
-          brew install bison cpanm
-          echo "/opt/homebrew/opt/bison/bin" >>$GITHUB_PATH
-          cpanm install JSON
       - name: Download DirectXShaderCompiler binaries
         if: ${{ !matrix.platform.vendored && runner.os != 'macOS' }}
         run: |
           cmake -P build-scripts/download-prebuilt-DirectXShaderCompiler.cmake
           echo "DirectXShaderCompiler_ROOT=${PWD}/external/DirectXShaderCompiler-binaries" >>${GITHUB_ENV}
-      - name: Build SPIRV-Cross
+
+      # ── SPIRV-Cross Release ─────────────────────────────────────────────────
+      - name: Build SPIRV-Cross (Release)
         if: ${{ matrix.platform.build-spirv-cross }}
         run: |
-          cmake -S external/SPIRV-Cross -B spirv_cross_build -GNinja \
+          cmake -S external/SPIRV-Cross -B spirv_cross_build_release -GNinja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DSPIRV_CROSS_SHARED=ON \
+            -DSPIRV_CROSS_SHARED=OFF \
             -DSPIRV_CROSS_STATIC=ON \
-            -DCMAKE_INSTALL_PREFIX=${PWD}/spirv_cross_prefix \
+            -DCMAKE_INSTALL_PREFIX=${PWD}/spirv_cross_prefix_release \
             ${{ matrix.platform.cmake-arguments }}
-          cmake --build spirv_cross_build
-          cmake --install spirv_cross_build
+          cmake --build spirv_cross_build_release
+          cmake --install spirv_cross_build_release
 
-          spirv_cross_prefix=${PWD}/spirv_cross_prefix
+          spirv_cross_prefix=${PWD}/spirv_cross_prefix_release
           if test "x${{ (matrix.platform.msvc && 'msvc') || '' }}" = "xmsvc"; then
             spirv_cross_prefix=$(cygpath -w "${spirv_cross_prefix}")
           fi
           joiner="${{ (runner.os == 'Windows' && ';') || ':' }}"
           echo "spirv_cross_c_shared_ROOT=${spirv_cross_prefix}${joiner}${spirv_cross_prefix}/share/spirv_cross_c_shared" >>${GITHUB_ENV}
 
-      - name: Configure (CMake)
+      # ── SPIRV-Cross Debug ───────────────────────────────────────────────────
+      - name: Build SPIRV-Cross (Debug)
+        if: ${{ matrix.platform.build-spirv-cross }}
         run: |
-          cmake -S . -B build -GNinja \
+          cmake -S external/SPIRV-Cross -B spirv_cross_build_debug -GNinja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DSPIRV_CROSS_SHARED=OFF \
+            -DSPIRV_CROSS_STATIC=ON \
+            -DCMAKE_INSTALL_PREFIX=${PWD}/spirv_cross_prefix_debug \
+            ${{ matrix.platform.cmake-arguments }}
+          cmake --build spirv_cross_build_debug
+          cmake --install spirv_cross_build_debug
+
+      # ── SDL_shadercross Release ─────────────────────────────────────────────
+      - name: Configure (CMake) Release
+        run: |
+          cmake -S . -B build_release -GNinja \
             -DSDLSHADERCROSS_TESTS=ON \
             -DSDLSHADERCROSS_TESTS_TRACKMEM=ON \
             -DCMAKE_BUILD_TYPE=Release \
-            -DSDLSHADERCROSS_SHARED=${{ matrix.platform.static-only && 'OFF' || 'ON' }} \
+            -DSDLSHADERCROSS_SHARED=OFF \
             -DSDLSHADERCROSS_STATIC=ON \
             -DSDLSHADERCROSS_VENDORED=${{ matrix.platform.vendored }} \
             -DSDLSHADERCROSS_CLI=ON \
@@ -108,112 +103,186 @@ jobs:
             -DSDLSHADERCROSS_INSTALL_RUNTIME=ON \
             -DSDLSHADERCROSS_INSTALL_CPACK=ON \
             -DSDLSHADERCROSS_INSTALL_MAN=ON \
-            -DCMAKE_INSTALL_PREFIX="${PWD}/prefix" \
+            -DCMAKE_INSTALL_PREFIX="${PWD}/prefix_release" \
             ${{ matrix.platform.cmake-arguments }}
 
-      - name: Build (CMake)
-        id: build
+      - name: Build (CMake) Release
+        id: build-release
         run: |
-          cmake --build build --config Release --parallel --verbose
+          cmake --build build_release --config Release --parallel --verbose
 
-      - name: Install (CMake)
-        id: install
-        if: ${{ always() && steps.build.outcome == 'success' }}
+      - name: Install (CMake) Release
+        id: install-release
+        if: ${{ always() && steps.build-release.outcome == 'success' }}
         run: |
-          cmake --install build/ --config Release
-          echo "SDL3_shadercross_ROOT=${PWD}/prefix" >>${GITHUB_ENV}
+          cmake --install build_release/ --config Release
 
-      - name: Collect static libs for linking (MSVC static only)
-        id: collect-static
-        if: ${{ always() && steps.build.outcome == 'success' && matrix.platform.static-only }}
+      # ── SDL_shadercross Debug ───────────────────────────────────────────────
+      - name: Configure (CMake) Debug
+        run: |
+          cmake -S . -B build_debug -GNinja \
+            -DSDLSHADERCROSS_TESTS=ON \
+            -DSDLSHADERCROSS_TESTS_TRACKMEM=ON \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DSDLSHADERCROSS_SHARED=OFF \
+            -DSDLSHADERCROSS_STATIC=ON \
+            -DSDLSHADERCROSS_VENDORED=${{ matrix.platform.vendored }} \
+            -DSDLSHADERCROSS_CLI=ON \
+            -DSDLSHADERCROSS_WERROR=ON \
+            -DSDLSHADERCROSS_INSTALL=ON \
+            -DSDLSHADERCROSS_INSTALL_RUNTIME=ON \
+            -DSDLSHADERCROSS_INSTALL_CPACK=ON \
+            -DSDLSHADERCROSS_INSTALL_MAN=ON \
+            -DCMAKE_INSTALL_PREFIX="${PWD}/prefix_debug" \
+            ${{ matrix.platform.cmake-arguments }}
+
+      - name: Build (CMake) Debug
+        id: build-debug
+        run: |
+          cmake --build build_debug --config Debug --parallel --verbose
+
+      - name: Install (CMake) Debug
+        id: install-debug
+        if: ${{ always() && steps.build-debug.outcome == 'success' }}
+        run: |
+          cmake --install build_debug/ --config Debug
+
+      # ── Collect Windows ─────────────────────────────────────────────────────
+      - name: Collect static libs (Windows MSVC)
+        id: collect-static-windows
+        if: ${{ always() && steps.build-release.outcome == 'success' && steps.build-debug.outcome == 'success' && matrix.platform.msvc }}
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path static-artifact/lib
+          New-Item -ItemType Directory -Force -Path static-artifact/lib/release
+          New-Item -ItemType Directory -Force -Path static-artifact/lib/debug
+          New-Item -ItemType Directory -Force -Path static-artifact/bin
           New-Item -ItemType Directory -Force -Path static-artifact/include
 
-          # SDL3_shadercross static lib
-          Copy-Item prefix/lib/SDL3_shadercross-static.lib static-artifact/lib/ -ErrorAction SilentlyContinue
-          Copy-Item prefix/lib/SDL3_shadercross.lib        static-artifact/lib/ -ErrorAction SilentlyContinue
-
-          # SPIRV-Cross static libs (all components you might need)
-          Get-ChildItem spirv_cross_prefix/lib/*.lib | ForEach-Object {
-            Copy-Item $_ static-artifact/lib/
+          # ── Release libs ──
+          Copy-Item prefix_release/lib/SDL3_shadercross-static.lib static-artifact/lib/release/ -ErrorAction SilentlyContinue
+          Copy-Item prefix_release/lib/SDL3_shadercross.lib        static-artifact/lib/release/ -ErrorAction SilentlyContinue
+          Get-ChildItem spirv_cross_prefix_release/lib/*.lib | ForEach-Object {
+            Copy-Item $_ static-artifact/lib/release/
           }
 
-          # DXC import lib (dxcompiler.lib) — needed at link time; the DLL ships at runtime
+          # ── Debug libs + PDBs ──
+          Copy-Item prefix_debug/lib/SDL3_shadercross-static.lib static-artifact/lib/debug/ -ErrorAction SilentlyContinue
+          Copy-Item prefix_debug/lib/SDL3_shadercross.lib        static-artifact/lib/debug/ -ErrorAction SilentlyContinue
+          Get-ChildItem spirv_cross_prefix_debug/lib/*.lib | ForEach-Object {
+            Copy-Item $_ static-artifact/lib/debug/
+          }
+          # PDBs from shadercross debug build
+          Get-ChildItem build_debug -Recurse -Filter *.pdb | ForEach-Object {
+            Copy-Item $_ static-artifact/lib/debug/
+          }
+          # PDBs from SPIRV-Cross debug build
+          Get-ChildItem spirv_cross_build_debug -Recurse -Filter *.pdb | ForEach-Object {
+            Copy-Item $_ static-artifact/lib/debug/
+          }
+
+          # ── DXC (release only — prebuilt, no debug variant available) ──
           $dxc_root = $env:DirectXShaderCompiler_ROOT
           if ($dxc_root) {
             Get-ChildItem "$dxc_root/lib/*.lib" -ErrorAction SilentlyContinue | ForEach-Object {
-              Copy-Item $_ static-artifact/lib/
+              Copy-Item $_ static-artifact/lib/release/
+              Copy-Item $_ static-artifact/lib/debug/   # same import lib for both configs
             }
-            # Also grab the DXC DLLs — you still need these at runtime even with static linking
-            New-Item -ItemType Directory -Force -Path static-artifact/bin
             Get-ChildItem "$dxc_root/bin/*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
               Copy-Item $_ static-artifact/bin/
             }
           }
 
-          # Headers
-          Copy-Item prefix/include -Destination static-artifact/ -Recurse -Force
+          # ── Headers ──
+          Copy-Item prefix_release/include -Destination static-artifact/ -Recurse -Force
 
-          # Write a CMake fragment so consumers can just include() it
+          # ── CMake helper ──
           @"
           # SDL3_shadercross static link helper
-          # Include this file in your CMakeLists.txt after setting SHADERCROSS_STATIC_DIR
-          # e.g. include(SDL3_shadercross_static.cmake)
-
-          set(_sc_lib_dir "`${CMAKE_CURRENT_LIST_DIR}/lib")
-          set(_sc_inc_dir "`${CMAKE_CURRENT_LIST_DIR}/include")
+          # Usage: include(SDL3_shadercross_static.cmake)
+          set(_sc_dir "`${CMAKE_CURRENT_LIST_DIR}")
 
           add_library(SDL3_shadercross::static STATIC IMPORTED GLOBAL)
+
           set_target_properties(SDL3_shadercross::static PROPERTIES
-            IMPORTED_LOCATION             "`${_sc_lib_dir}/SDL3_shadercross-static.lib"
-            INTERFACE_INCLUDE_DIRECTORIES "`${_sc_inc_dir}"
+            IMPORTED_LOCATION_RELEASE     "`${_sc_dir}/lib/release/SDL3_shadercross-static.lib"
+            IMPORTED_LOCATION_DEBUG       "`${_sc_dir}/lib/debug/SDL3_shadercross-static.lib"
+            INTERFACE_INCLUDE_DIRECTORIES "`${_sc_dir}/include"
             INTERFACE_LINK_LIBRARIES      [=[
-              `${_sc_lib_dir}/spirv-cross-c.lib
-              `${_sc_lib_dir}/spirv-cross-core.lib
-              `${_sc_lib_dir}/spirv-cross-glsl.lib
-              `${_sc_lib_dir}/spirv-cross-hlsl.lib
-              `${_sc_lib_dir}/spirv-cross-msl.lib
-              `${_sc_lib_dir}/spirv-cross-reflect.lib
-              `${_sc_lib_dir}/spirv-cross-util.lib
-              `${_sc_lib_dir}/dxcompiler.lib
+              `$<`$<CONFIG:Debug>:
+                `${_sc_dir}/lib/debug/spirv-cross-c.lib
+                `${_sc_dir}/lib/debug/spirv-cross-core.lib
+                `${_sc_dir}/lib/debug/spirv-cross-glsl.lib
+                `${_sc_dir}/lib/debug/spirv-cross-hlsl.lib
+                `${_sc_dir}/lib/debug/spirv-cross-msl.lib
+                `${_sc_dir}/lib/debug/spirv-cross-reflect.lib
+                `${_sc_dir}/lib/debug/spirv-cross-util.lib
+              >
+              `$<`$<NOT:`$<CONFIG:Debug>>:
+                `${_sc_dir}/lib/release/spirv-cross-c.lib
+                `${_sc_dir}/lib/release/spirv-cross-core.lib
+                `${_sc_dir}/lib/release/spirv-cross-glsl.lib
+                `${_sc_dir}/lib/release/spirv-cross-hlsl.lib
+                `${_sc_dir}/lib/release/spirv-cross-msl.lib
+                `${_sc_dir}/lib/release/spirv-cross-reflect.lib
+                `${_sc_dir}/lib/release/spirv-cross-util.lib
+              >
+              `${_sc_dir}/lib/release/dxcompiler.lib
             ]=]
           )
           "@ | Out-File -Encoding utf8 static-artifact/SDL3_shadercross_static.cmake
 
-      - name: Package (CPack)
-        id: package
-        if: ${{ always() && steps.build.outcome == 'success' }}
+      # ── Collect Linux ───────────────────────────────────────────────────────
+      - name: Collect static libs (Linux)
+        id: collect-static-linux
+        if: ${{ always() && steps.build-release.outcome == 'success' && steps.build-debug.outcome == 'success' && contains(matrix.platform.os, 'ubuntu') }}
         run: |
-          cmake --build build/ --target package
+          mkdir -p static-artifact/lib/release static-artifact/lib/debug static-artifact/bin static-artifact/include
 
+          # ── Release libs ──
+          cp prefix_release/lib/libSDL3_shadercross.a static-artifact/lib/release/ 2>/dev/null || true
+          find spirv_cross_prefix_release/lib -name "*.a" -exec cp {} static-artifact/lib/release/ \;
+
+          # ── Debug libs ──
+          cp prefix_debug/lib/libSDL3_shadercross.a static-artifact/lib/debug/ 2>/dev/null || true
+          find spirv_cross_prefix_debug/lib -name "*.a" -exec cp {} static-artifact/lib/debug/ \;
+
+          # ── DXC runtime (prebuilt, no debug variant) ──
+          dxc_root="${DirectXShaderCompiler_ROOT}"
+          if [ -n "$dxc_root" ]; then
+            find "$dxc_root/lib" -name "*.a" -exec cp {} static-artifact/lib/release/ \; 2>/dev/null || true
+            find "$dxc_root/bin" -name "*.so*" -exec cp {} static-artifact/bin/ \; 2>/dev/null || true
+          fi
+
+          # ── Headers ──
+          cp -r prefix_release/include static-artifact/
+
+          # ── CMake helper ──
+          cat > static-artifact/SDL3_shadercross_static.cmake << 'EOF'
+          # SDL3_shadercross static link helper
+          set(_sc_dir "${CMAKE_CURRENT_LIST_DIR}")
+
+          add_library(SDL3_shadercross::static STATIC IMPORTED GLOBAL)
+
+          set_target_properties(SDL3_shadercross::static PROPERTIES
+            IMPORTED_LOCATION_RELEASE     "${_sc_dir}/lib/release/libSDL3_shadercross.a"
+            IMPORTED_LOCATION_DEBUG       "${_sc_dir}/lib/debug/libSDL3_shadercross.a"
+            INTERFACE_INCLUDE_DIRECTORIES "${_sc_dir}/include"
+            INTERFACE_LINK_LIBRARIES
+              "$<$<CONFIG:Debug>:${_sc_dir}/lib/debug/libspirv-cross-c.a;${_sc_dir}/lib/debug/libspirv-cross-core.a;${_sc_dir}/lib/debug/libspirv-cross-glsl.a;${_sc_dir}/lib/debug/libspirv-cross-hlsl.a;${_sc_dir}/lib/debug/libspirv-cross-msl.a;${_sc_dir}/lib/debug/libspirv-cross-reflect.a;${_sc_dir}/lib/debug/libspirv-cross-util.a>$<$<NOT:$<CONFIG:Debug>>:${_sc_dir}/lib/release/libspirv-cross-c.a;${_sc_dir}/lib/release/libspirv-cross-core.a;${_sc_dir}/lib/release/libspirv-cross-glsl.a;${_sc_dir}/lib/release/libspirv-cross-hlsl.a;${_sc_dir}/lib/release/libspirv-cross-msl.a;${_sc_dir}/lib/release/libspirv-cross-reflect.a;${_sc_dir}/lib/release/libspirv-cross-util.a>"
+          )
+          EOF
+
+      # ── Tests (Release build) ───────────────────────────────────────────────
       - name: Tests (CTest)
         id: test
-        if: ${{ always() && steps.build.outcome == 'success' }}
+        if: ${{ always() && steps.build-release.outcome == 'success' }}
         run: |
-          cd build/test
+          cd build_release/test
           ctest . -V -C Release
 
-      - name: Verify CMake configuration files
-        if: ${{ always() && steps.install.outcome == 'success' && !matrix.platform.static-only }}
-        run: |
-          cmake -S cmake/test -B cmake_config_build -GNinja \
-            -DCMAKE_BUILD_TYPE=Release \
-            ${{ matrix.platform.cmake-arguments }}
-          cmake --build cmake_config_build --verbose
-
-      # Original artifact upload (CPack dist) for all non-static jobs
+      # ── Upload ──────────────────────────────────────────────────────────────
       - uses: actions/upload-artifact@v4
-        if: ${{ always() && steps.package.outcome == 'success' && !matrix.platform.static-only }}
-        with:
-          if-no-files-found: error
-          name: ${{ matrix.platform.artifact }}
-          path: build/dist/SDL*
-
-      # Static artifact upload — the manually collected lib bundle
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() && steps.collect-static.outcome == 'success' }}
+        if: ${{ always() && (steps.collect-static-windows.outcome == 'success' || steps.collect-static-linux.outcome == 'success') }}
         with:
           if-no-files-found: error
           name: ${{ matrix.platform.artifact }}
